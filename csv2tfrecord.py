@@ -4,6 +4,7 @@ from os import walk
 import imghdr
 import numpy as np
 from PIL import Image
+import io
 
 def int64_feature(value):
     return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
@@ -31,12 +32,12 @@ def create_tf_example(example):
   height = example["height"]
   width = example["width"]
 
-  xmins = [ xmin / width for xmin in example["xmins"] ]
-  xmaxs = [ xmax / width for xmax in example["xmaxs"] ]
-  ymins = [ ymin / width for ymin in example["ymins"] ]
-  ymaxs = [ ymax / width for ymax in example["ymaxs"] ]
-  classes_text = example["classes_text"]
-  # classes = example["classes"]
+  xmins = [ int(xmin) / width for xmin in example["xmins"] ]
+  xmaxs = [ int(xmax) / width for xmax in example["xmaxs"] ]
+  ymins = [ int(ymin) / width for ymin in example["ymins"] ]
+  ymaxs = [ int(ymax) / width for ymax in example["ymaxs"] ]
+  classes_text = [ str.encode(class_text) for class_text in example["classes_text"] ]
+  classes = [ int(lass) for lass in example["classes"] ]
 
   tf_example = tf.train.Example(features=tf.train.Features(feature={
       'image/height': int64_feature(height),
@@ -50,7 +51,7 @@ def create_tf_example(example):
       'image/object/bbox/ymin': float_list_feature(ymins),
       'image/object/bbox/ymax': float_list_feature(ymaxs),
       'image/object/class/text': bytes_list_feature(classes_text),
-      # 'image/object/class/label': int64_list_feature(classes),
+      'image/object/class/label': int64_list_feature(classes),
   }))
   return tf_example
 
@@ -65,8 +66,11 @@ def get_examples(images_directory, labels_file):
         example = {}
 
         example["filename"] = f
-        img = np.array(Image.open(images_directory + f))
-        example["bytes"] = img.tostring()
+        img_path = images_directory + f
+        with tf.gfile.GFile(img_path, 'rb') as fid:
+            encoded_jpg = fid.read()
+        example["bytes"] = encoded_jpg
+        img = np.array(Image.open(img_path))
         example["height"] = img.shape[0]
         example["width"] = img.shape[1]
         example["format"] = imghdr.what(images_directory + f)
@@ -76,33 +80,44 @@ def get_examples(images_directory, labels_file):
         example["ymins"] = []
         example["ymaxs"] = []
         example["classes_text"] = []
-        # example["classes"] = []
+        example["classes"] = []
         labels = open(labels_file, 'r')
-        labels.readline() # throw away
+        assert(len(labels.readline().split(',')) == 7) # id,image,name,xMin,xMax,yMin,yMax
         line = labels.readline()
         while line:
             vals = line.split(',')
-            if vals[1] == f:
-                example["xmins"].append(vals[2])
-                example["xmaxs"].append(vals[3])
-                example["ymins"].append(vals[4])
-                example["ymaxs"].append(vals[5])
+            if vals[0] == f:
+                example["classes"].append(vals[1])
+                example["classes_text"].append(vals[2])
+                example["xmins"].append(vals[3])
+                example["xmaxs"].append(vals[4])
+                example["ymins"].append(vals[5])
+                example["ymaxs"].append(vals[6])
             line = labels.readline()
         labels.close()
         examples.append(example)
     return examples
 
-def main(images_directory, labels_file, out_file):
+def main(images_directory, labels_file, out_file, split):
 
-    writer = tf.python_io.TFRecordWriter(out_file)
+    writer_train = tf.python_io.TFRecordWriter(out_file + "_train.tfrecord")
+    writer_test = tf.python_io.TFRecordWriter(out_file + "_test.tfrecord")
+    if split == None:
+        split = 5
 
     examples = get_examples(images_directory, labels_file)
 
+    count = 0
     for example in examples:
         tf_example = create_tf_example(example)
-        writer.write(tf_example.SerializeToString())
+        if (count % split) != 0:
+            writer_train.write(tf_example.SerializeToString())
+        else:
+            writer_test.write(tf_example.SerializeToString())
+        count += 1
 
-    writer.close()
+    writer_train.close()
+    writer_test.close()
 
 
 if __name__ == "__main__":
@@ -112,9 +127,10 @@ if __name__ == "__main__":
     # parser.add_argument("images_height")
     parser.add_argument("labels_file")
     parser.add_argument("--out")
+    parser.add_argument("--split")
     args = parser.parse_args()
     if args.images_directory[-1] != '/':
         args.images_directory += '/'
     if args.out == None:
         args.out = "out.tfrecords"
-    main(args.images_directory, args.labels_file, args.out)
+    main(args.images_directory, args.labels_file, args.out, args.split)
